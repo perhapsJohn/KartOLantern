@@ -11,7 +11,11 @@
 		     The game's night palette (data/main/edition.json): loading, the turn-sideways
 		     card and the first frame read as one thing, in the Scareathon arcade iframe or
 		     alone. One page, two packs: phones load index.mobile.pck, desktops index.pck
-		     (tools/web_build.sh fills in KOL_MOBILE_PCK_SIZE). -->
+		     (tools/web_build.py fills in KOL_MOBILE_PCK_SIZE). The loading screen is the
+		     painted key art (index.bg.webp, from ui/menu_bg.png) under the logo, the same
+		     art the title shows on its first frame, and it stays up until the game says it
+		     has drawn that frame (window.koGameShown, ui/screens/title.gd): never black. -->
+		<link rel="preload" href="index.bg.webp" as="image">
 		<style>
 html, body, #canvas { margin: 0; padding: 0; border: 0; }
 html, body { width: 100%; height: 100%; }
@@ -35,10 +39,19 @@ body {
 	gap: 0.7rem; text-align: center; padding: 1rem; box-sizing: border-box;
 	background: radial-gradient(ellipse at 50% 112%, #5a2a14 0%, #2a1638 38%, #120d1c 72%);
 }
-#status { visibility: hidden; }
+#status { visibility: hidden; z-index: 4; transition: opacity 0.45s ease-out; }
+#status, #lost {
+	background:
+		linear-gradient(180deg, rgba(18, 13, 28, 0.05) 0%, rgba(18, 13, 28, 0.35) 62%, rgba(18, 13, 28, 0.8) 100%),
+		url('index.bg.webp') center / cover no-repeat,
+		radial-gradient(ellipse at 50% 112%, #5a2a14 0%, #2a1638 38%, #120d1c 72%);
+}
+#status.leaving { opacity: 0; pointer-events: none; }
+#status > * { transition: opacity 0.15s ease-out; }
+#status.leaving > * { opacity: 0; }  /* the logo goes first: the title draws its own at the top */
 #status-logo { width: min(78vw, 540px, 112vh); height: auto; filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.6)); }
 #status-title { display: none; font-weight: 900; font-size: clamp(2rem, 9vw, 3.6rem); color: #ff7a1a; }
-#status-tag { color: #b9a7c9; font-size: clamp(0.85rem, 3.4vw, 1.05rem); }
+#status-tag { color: #e6d9f2; font-size: clamp(0.85rem, 3.4vw, 1.05rem); text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9); }
 #status-bar {
 	width: min(60vw, 320px); height: 10px; margin-top: 0.3rem;
 	border-radius: 999px; background: rgba(0, 0, 0, 0.45); overflow: hidden;
@@ -61,6 +74,17 @@ body {
 	box-shadow: 0 6px 14px rgba(0, 0, 0, 0.45);
 }
 #status-splash { display: none; }
+#lost { display: none; z-index: 6; }
+#lost.show { display: flex; }
+#lost img { width: min(60vw, 420px, 80vh); height: auto; filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.6)); }
+#lost-tag { max-width: 26rem; line-height: 1.45; text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9); }
+#lost button {
+	font: inherit; font-weight: 800; color: #241634; background: #ffc94a;
+	border: 0; border-radius: 999px; padding: 0.6rem 1.4rem; cursor: pointer;
+	box-shadow: 0 4px 0 #b4561a;
+}
+#lost button:hover { background: #ffd877; }
+#lost button:active { transform: translateY(3px); box-shadow: 0 1px 0 #b4561a; }
 #turn { display: none; z-index: 5; }
 #turn.show { display: flex; }
 #turn svg { width: 92px; height: 92px; }
@@ -82,6 +106,11 @@ body {
 			<div id="status-bar"><div id="status-fill"></div></div>
 			<div id="status-notice"></div>
 		</div>
+		<div id="lost" class="cover" role="alert">
+			<img src="index.logo.webp" alt="Kart-o'-Lantern">
+			<div id="lost-tag">The lanterns blew out: this browser stopped the game's graphics (its WebGL context was lost).</div>
+			<button type="button" onclick="location.reload()">Light them again</button>
+		</div>
 		<div id="turn" class="cover" aria-live="polite">
 			<svg viewBox="0 0 92 92" aria-hidden="true">
 				<rect x="28" y="10" width="36" height="62" rx="7" fill="none" stroke="#b9a7c9" stroke-width="4" stroke-dasharray="6 5"/>
@@ -95,19 +124,92 @@ body {
 		</div>
 
 		<script>
-// Browsers start audio suspended until a gesture: keep every AudioContext the
-// engine makes and resume them on the first tap / click / key.
+// Audio unlock. Browsers keep audio suspended until a user gesture, and iOS
+// Safari only lets it start *inside* one. The engine creates its AudioContext
+// (GodotAudio.ctx) out of reach, so the constructor is wrapped here, before the
+// engine loads, and every instance is recorded. Each tap / click / key then,
+// synchronously in the handler:
+//   * on iOS, sets navigator.audioSession to "playback" (iOS 17+) and plays a
+//     silent looping <audio>, so the ring/silent switch does not mute the game;
+//   * resumes every context that is not running.
+// window.koAudioUnlocked turns true once a gesture has run them all;
+// core/audio.gd polls it and restarts the requested music then, so the title's
+// first input ("Tap to start" / any key) is the moment the menu music starts.
+// The listeners stay: iOS suspends ("interrupted") on calls and app switches.
 (function () {
 	const AC = window.AudioContext || window.webkitAudioContext;
 	const ctxs = [];
+	const ua = navigator.userAgent;
+	const IOS = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+	let gestured = false;
+	let tag = null;
+	window.koAudioUnlocked = false;
+	window.koAudioContexts = ctxs;  // read by the page checks (tools/web_audio_check.mjs)
+	function update() {
+		const live = ctxs.filter((c) => c.state !== 'closed');
+		if (gestured && live.length > 0 && live.every((c) => c.state === 'running')) {
+			window.koAudioUnlocked = true;
+		}
+	}
 	if (AC) {
-		const Wrapped = function (...args) { const c = new AC(...args); ctxs.push(c); return c; };
+		const Wrapped = function (...args) {
+			const c = new AC(...args);
+			ctxs.push(c);
+			c.addEventListener('statechange', update);
+			return c;
+		};
 		Wrapped.prototype = AC.prototype;
 		window.AudioContext = Wrapped;
 		if (window.webkitAudioContext) { window.webkitAudioContext = Wrapped; }
 	}
-	const unlock = () => ctxs.forEach((c) => { if (c.state !== 'running' && c.state !== 'closed') { c.resume(); } });
-	['pointerdown', 'pointerup', 'touchend', 'keydown', 'click'].forEach((e) => document.addEventListener(e, unlock, true));
+	// 0.5 s of 8-bit silence (a WAV built here: no extra file to fetch)
+	function silentWav() {
+		const rate = 8000, n = 4000, v = new DataView(new ArrayBuffer(44 + n));
+		const str = (o, t) => { for (let i = 0; i < t.length; i++) { v.setUint8(o + i, t.charCodeAt(i)); } };
+		str(0, 'RIFF'); v.setUint32(4, 36 + n, true); str(8, 'WAVE'); str(12, 'fmt ');
+		v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+		v.setUint32(24, rate, true); v.setUint32(28, rate, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+		str(36, 'data'); v.setUint32(40, n, true);
+		for (let i = 0; i < n; i++) { v.setUint8(44 + i, 128); }
+		return URL.createObjectURL(new Blob([v.buffer], { type: 'audio/wav' }));
+	}
+	function playbackSession() {
+		if (!IOS || document.hidden) { return; }
+		try { if (navigator.audioSession) { navigator.audioSession.type = 'playback'; } } catch (e) { /* older iOS */ }
+		if (!tag) {
+			tag = document.createElement('audio');
+			tag.setAttribute('playsinline', '');
+			tag.setAttribute('x-webkit-airplay', 'deny');
+			tag.disableRemotePlayback = true;
+			tag.loop = true;
+			tag.preload = 'auto';
+			tag.src = silentWav();
+		}
+		if (tag.paused) { const p = tag.play(); if (p) { p.catch(() => {}); } }
+	}
+	function unlock(ev) {
+		if (ev && ev.isTrusted === false) { return; }
+		playbackSession();
+		if (ctxs.length > 0) { gestured = true; }
+		ctxs.forEach((c) => {
+			if (c.state !== 'running' && c.state !== 'closed') {
+				const p = c.resume();
+				if (p) { p.then(update, () => {}); }
+			}
+		});
+		update();
+	}
+	['pointerdown', 'pointerup', 'mousedown', 'touchstart', 'touchend', 'click', 'keydown'].forEach((e) =>
+		window.addEventListener(e, unlock, { capture: true, passive: true }));
+	// the silent loop would show in the lock screen's player: pause it while hidden
+	document.addEventListener('visibilitychange', () => {
+		if (document.hidden) {
+			if (tag && !tag.paused) { tag.pause(); }
+		} else if (gestured) {
+			playbackSession();
+			ctxs.forEach((c) => { if (c.state !== 'running' && c.state !== 'closed') { c.resume().catch(() => {}); } });
+		}
+	});
 }());
 
 // Phones and tablets get the phone pack, the turn-sideways card and a capped
@@ -131,11 +233,11 @@ const KOL_PHONE = (function () {
 		</script>
 		<script src="index.js"></script>
 		<script>
-const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":false,"executable":"index","experimentalVK":false,"fileSizes":{"index.pck":54728032,"index.wasm":37686550},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
+const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":false,"executable":"index","experimentalVK":false,"fileSizes":{"index.pck":58170636,"index.wasm":37686550},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
 const GODOT_THREADS_ENABLED = false;
 const KOL_PACK = KOL_PHONE ? 'index.mobile.pck' : 'index.pck';  // phones never download the desktop pack
-if (GODOT_CONFIG.fileSizes && '45994272' !== 'KOL_' + 'MOBILE_PCK_SIZE') {
-	GODOT_CONFIG.fileSizes['index.mobile.pck'] = Number('45994272');
+if (GODOT_CONFIG.fileSizes && '49436876' !== 'KOL_' + 'MOBILE_PCK_SIZE') {
+	GODOT_CONFIG.fileSizes['index.mobile.pck'] = Number('49436876');
 }
 // The page URL carries the game's dev flags for scripted checks, e.g.
 // ?race=graveyard&mode=gp&autodrive=1&laps=1 (ui/app.gd, race/race.gd, core/arcade.gd);
@@ -162,7 +264,13 @@ const engine = new Engine(GODOT_CONFIG);
 
 	function setMode(m) {
 		if (mode === m || !initializing) { return; }
-		if (m === 'hidden') { overlay.remove(); initializing = false; return; }
+		if (m === 'hidden') {
+			// fade out over the game's first frame (the same key art), then go
+			initializing = false;
+			overlay.classList.add('leaving');
+			setTimeout(() => overlay.remove(), 600);
+			return;
+		}
 		overlay.style.visibility = 'visible';
 		bar.style.display = m === 'progress' ? 'block' : 'none';
 		notice.style.display = m === 'notice' ? 'block' : 'none';
@@ -185,6 +293,12 @@ const engine = new Engine(GODOT_CONFIG);
 	window.addEventListener('resize', checkTurn);
 	window.addEventListener('orientationchange', checkTurn);
 	checkTurn();
+
+	// The browser can drop the WebGL context (GPU reset, memory pressure; the
+	// engine cannot rebuild it): show the key art and a reload, never a black page.
+	document.getElementById('canvas').addEventListener('webglcontextlost', () => {
+		document.getElementById('lost').classList.add('show');
+	});
 
 	// Keep keyboard focus on the game after taps on the page.
 	document.addEventListener('pointerdown', () => {
@@ -213,7 +327,13 @@ const engine = new Engine(GODOT_CONFIG);
 				fill.classList.add('indeterminate');
 			}
 		},
-	}).then(() => setMode('hidden'), fail);
+	}).then(() => {
+		// the engine runs; the title calls koGameShown once it has drawn the key
+		// art (a dev ?screen= / ?race= start never does: hand over after a moment)
+		bar.style.display = 'none';
+		setTimeout(() => setMode('hidden'), 4000);
+	}, fail);
+	window.koGameShown = () => setMode('hidden');
 }());
 		</script>
 	</body>
