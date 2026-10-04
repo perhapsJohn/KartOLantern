@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+		<meta name="mobile-web-app-capable" content="yes">
+		<meta name="apple-mobile-web-app-capable" content="yes">
+		<meta name="theme-color" content="#120d1c">
+		<title>Kart-o'-Lantern</title>
+		<!-- Kart-o'-Lantern web shell (web/shell.html, the Web preset's custom_html_shell).
+		     The game's night palette (data/main/edition.json): loading, the turn-sideways
+		     card and the first frame read as one thing, in the Scareathon arcade iframe or
+		     alone. One page, two packs: phones load index.mobile.pck, desktops index.pck
+		     (tools/web_build.sh fills in KOL_MOBILE_PCK_SIZE). -->
+		<style>
+html, body, #canvas { margin: 0; padding: 0; border: 0; }
+html, body { width: 100%; height: 100%; }
+body {
+	background: #120d1c;
+	color: #fff3e0;
+	overflow: hidden;
+	touch-action: none;
+	-webkit-user-select: none;
+	user-select: none;
+	-webkit-touch-callout: none;
+	-webkit-tap-highlight-color: transparent;
+	overscroll-behavior: none;
+	font-family: 'Avenir Next', 'Segoe UI', system-ui, sans-serif;
+}
+#canvas { display: block; touch-action: none; }
+#canvas:focus { outline: none; }
+.cover {
+	position: absolute; inset: 0;
+	display: flex; flex-direction: column; justify-content: center; align-items: center;
+	gap: 0.7rem; text-align: center; padding: 1rem; box-sizing: border-box;
+	background: radial-gradient(ellipse at 50% 112%, #5a2a14 0%, #2a1638 38%, #120d1c 72%);
+}
+#status { visibility: hidden; }
+#status-logo { width: min(78vw, 540px, 112vh); height: auto; filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.6)); }
+#status-title { display: none; font-weight: 900; font-size: clamp(2rem, 9vw, 3.6rem); color: #ff7a1a; }
+#status-tag { color: #b9a7c9; font-size: clamp(0.85rem, 3.4vw, 1.05rem); }
+#status-bar {
+	width: min(60vw, 320px); height: 10px; margin-top: 0.3rem;
+	border-radius: 999px; background: rgba(0, 0, 0, 0.45); overflow: hidden;
+	box-shadow: 0 0 0 2px rgba(255, 122, 26, 0.25);
+	display: none;
+}
+#status-fill {
+	height: 100%; width: 0%;
+	background: linear-gradient(90deg, #ff7a1a, #ffc94a);
+	border-radius: 999px;
+	transition: width 0.2s ease-out;
+}
+#status-fill.indeterminate { width: 35%; animation: slide 1.2s ease-in-out infinite alternate; }
+@keyframes slide { from { margin-left: 0%; } to { margin-left: 65%; } }
+#status-notice {
+	display: none;
+	background: #fff3e0; color: #241634;
+	border-radius: 14px; line-height: 1.45;
+	max-width: 30rem; padding: 1rem 1.25rem;
+	box-shadow: 0 6px 14px rgba(0, 0, 0, 0.45);
+}
+#status-splash { display: none; }
+#turn { display: none; z-index: 5; }
+#turn.show { display: flex; }
+#turn svg { width: 92px; height: 92px; }
+#turn-title { font-weight: 800; font-size: 1.35rem; color: #ffc94a; }
+#turn-tag { color: #b9a7c9; font-size: 0.95rem; max-width: 18rem; }
+		</style>
+		<link id="-gd-engine-icon" rel="icon" type="image/png" href="index.icon.png" />
+<link rel="apple-touch-icon" href="index.apple-touch-icon.png"/>
+
+	</head>
+	<body>
+		<canvas id="canvas">Your browser does not support the canvas tag.</canvas>
+		<noscript>Kart-o'-Lantern needs JavaScript.</noscript>
+		<div id="status" class="cover">
+			<img id="status-splash" class="show-image--false fullsize--true use-filter--true" src="index.png" alt="">
+			<img id="status-logo" src="index.logo.webp" alt="Kart-o'-Lantern" onerror="this.remove(); document.getElementById('status-title').style.display = 'block';">
+			<div id="status-title">Kart-o'-Lantern</div>
+			<div id="status-tag">Lighting the lanterns along the track&hellip;</div>
+			<div id="status-bar"><div id="status-fill"></div></div>
+			<div id="status-notice"></div>
+		</div>
+		<div id="turn" class="cover" aria-live="polite">
+			<svg viewBox="0 0 92 92" aria-hidden="true">
+				<rect x="28" y="10" width="36" height="62" rx="7" fill="none" stroke="#b9a7c9" stroke-width="4" stroke-dasharray="6 5"/>
+				<rect x="12" y="34" width="62" height="36" rx="7" fill="#241634" stroke="#ff7a1a" stroke-width="4"/>
+				<circle cx="66" cy="52" r="3" fill="#ff7a1a"/>
+				<path d="M70 18 a22 22 0 0 1 10 22" fill="none" stroke="#ffc94a" stroke-width="4" stroke-linecap="round"/>
+				<path d="M74 40 l6 1 l2 -6" fill="none" stroke="#ffc94a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+			</svg>
+			<div id="turn-title">Turn your phone sideways</div>
+			<div id="turn-tag">Steer with your left thumb; drift and throw items with your right.</div>
+		</div>
+
+		<script>
+// Browsers start audio suspended until a gesture: keep every AudioContext the
+// engine makes and resume them on the first tap / click / key.
+(function () {
+	const AC = window.AudioContext || window.webkitAudioContext;
+	const ctxs = [];
+	if (AC) {
+		const Wrapped = function (...args) { const c = new AC(...args); ctxs.push(c); return c; };
+		Wrapped.prototype = AC.prototype;
+		window.AudioContext = Wrapped;
+		if (window.webkitAudioContext) { window.webkitAudioContext = Wrapped; }
+	}
+	const unlock = () => ctxs.forEach((c) => { if (c.state !== 'running' && c.state !== 'closed') { c.resume(); } });
+	['pointerdown', 'pointerup', 'touchend', 'keydown', 'click'].forEach((e) => document.addEventListener(e, unlock, true));
+}());
+
+// Phones and tablets get the phone pack, the turn-sideways card and a capped
+// pixel ratio (a 3x screen would render the 3D at 9x the pixels for little
+// gain). ?pack=mobile / ?pack=desktop forces a pack (testing).
+const KOL_QUERY = new URLSearchParams(location.search);
+const KOL_PHONE = (function () {
+	const forced = KOL_QUERY.get('pack');
+	if (forced === 'mobile' || forced === 'desktop') { return forced === 'mobile'; }
+	const ua = navigator.userAgent;
+	return /iPhone|iPad|iPod|Android/i.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)
+		|| window.matchMedia('(pointer: coarse) and (max-height: 1100px)').matches;
+}());
+(function () {
+	const real = window.devicePixelRatio || 1;
+	const cap = KOL_PHONE ? 1.5 : 2;
+	if (real > cap) {
+		try { Object.defineProperty(window, 'devicePixelRatio', { get: () => cap, configurable: true }); } catch (e) { /* keep the real one */ }
+	}
+}());
+		</script>
+		<script src="index.js"></script>
+		<script>
+const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":false,"executable":"index","experimentalVK":false,"fileSizes":{"index.pck":54727744,"index.wasm":37686550},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
+const GODOT_THREADS_ENABLED = false;
+const KOL_PACK = KOL_PHONE ? 'index.mobile.pck' : 'index.pck';  // phones never download the desktop pack
+if (GODOT_CONFIG.fileSizes && '45993984' !== 'KOL_' + 'MOBILE_PCK_SIZE') {
+	GODOT_CONFIG.fileSizes['index.mobile.pck'] = Number('45993984');
+}
+// The page URL carries the game's dev flags for scripted checks, e.g.
+// ?race=graveyard&mode=gp&autodrive=1&laps=1 (ui/app.gd, race/race.gd, core/arcade.gd);
+// ?room=CODE is an invite (addons/online_mp reads it itself).
+const KOL_ARGS = (function () {
+	const allowed = ['screen', 'race', 'mode', 'cc', 'players', 'autodrive', 'no-intro', 'time-scale', 'laps', 'unlock-all', 'touch', 'no-attract'];
+	const user = [];
+	for (const k of allowed) {
+		if (KOL_QUERY.has(k)) { user.push('--' + k + '=' + (KOL_QUERY.get(k) || '1')); }
+	}
+	const engineArgs = KOL_QUERY.get('verbose') ? ['--verbose'] : [];
+	return user.length ? engineArgs.concat(['--'], user) : engineArgs;
+}());
+const engine = new Engine(GODOT_CONFIG);
+
+(function () {
+	const overlay = document.getElementById('status');
+	const bar = document.getElementById('status-bar');
+	const fill = document.getElementById('status-fill');
+	const notice = document.getElementById('status-notice');
+	const turn = document.getElementById('turn');
+	let initializing = true;
+	let mode = '';
+
+	function setMode(m) {
+		if (mode === m || !initializing) { return; }
+		if (m === 'hidden') { overlay.remove(); initializing = false; return; }
+		overlay.style.visibility = 'visible';
+		bar.style.display = m === 'progress' ? 'block' : 'none';
+		notice.style.display = m === 'notice' ? 'block' : 'none';
+		mode = m;
+	}
+
+	function fail(err) {
+		console.error(err);
+		const text = err instanceof Error ? err.message : (typeof err === 'string' ? err : 'The karts would not start.');
+		notice.textContent = '';
+		text.split('\n').forEach((line) => { notice.appendChild(document.createTextNode(line)); notice.appendChild(document.createElement('br')); });
+		setMode('notice');
+		initializing = false;
+	}
+
+	// A landscape game: on a phone held upright, ask for it sideways.
+	function checkTurn() {
+		turn.classList.toggle('show', KOL_PHONE && window.innerHeight > window.innerWidth * 1.05);
+	}
+	window.addEventListener('resize', checkTurn);
+	window.addEventListener('orientationchange', checkTurn);
+	checkTurn();
+
+	// Keep keyboard focus on the game after taps on the page.
+	document.addEventListener('pointerdown', () => {
+		const c = document.getElementById('canvas');
+		if (c && document.activeElement !== c) { c.focus(); }
+	}, true);
+	// The page itself never zooms (pinch, double-tap) or scrolls.
+	document.addEventListener('gesturestart', (e) => e.preventDefault());
+	document.addEventListener('dblclick', (e) => e.preventDefault());
+	document.addEventListener('touchmove', (e) => { if (e.touches.length > 1) { e.preventDefault(); } }, { passive: false });
+
+	const missing = Engine.getMissingFeatures({ threads: GODOT_THREADS_ENABLED });
+	if (missing.length !== 0) {
+		fail('This browser is missing features the game needs:\n' + missing.join('\n') + '\nTry a current Chrome, Edge, Firefox or Safari.');
+		return;
+	}
+	setMode('progress');
+	engine.startGame({
+		mainPack: KOL_PACK,
+		args: KOL_ARGS,
+		onProgress: function (current, total) {
+			if (current > 0 && total > 0) {
+				fill.classList.remove('indeterminate');
+				fill.style.width = Math.min(100, (100 * current) / total).toFixed(1) + '%';
+			} else {
+				fill.classList.add('indeterminate');
+			}
+		},
+	}).then(() => setMode('hidden'), fail);
+}());
+		</script>
+	</body>
+</html>
+
